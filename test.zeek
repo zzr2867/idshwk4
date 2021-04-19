@@ -1,29 +1,38 @@
-global responseCounter:table[addr] of count;
-global _404Counter:count;
-global uniqueURLCounter:count;
+@load base/frameworks/sumstats
+
+event http_reply (c: connection, version: string, code: count, reason: string){
+    if(code==404){
+        SumStats::observe("404", 
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($num=1));
+        SumStats::observe("Unique404Url", 
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($str=c$http$uri));
+    }
+    SumStats::observe("response", 
+                      SumStats::Key($host=c$id$orig_h), 
+                      SumStats::Observation($num=1));
+}
+
 
 event zeek_init()
-{
-  local t:SumStats::Reducer  = [$stream = "scan_detect_404.lookup", $apply = set(SumStats::UNIQUE)];
-  SumStats::create([$name     = "scan_detect_url",
-                    $epoch    = 10min,
-                    $reducers = set(t),
-                    $epoch_result(ts:time, key:SumStats::Key, result:SumStats::Result) = 
-                    {
-                      _404Counter      = result["scan_detect_404.lookup"]$num;
-                      uniqueURLCounter = result["scan_detect_404.lookup"]$unique;
-                      if ( (_404Counter > 2) && (_404Counter > 0.2 * responseCounter[key$host]) && (uniqueURLCounter > 0.5 * _404Counter) )
-                        print fmt("%s is a scanner with %d scan attemps on %d urls", key$host, _404Counter, uniqueURLCounter);
-                    }
-                   ]);
-}
+    {
+    local r1 = SumStats::Reducer($stream="404", 
+                                 $apply=set(SumStats::SUM));
+    local r2 = SumStats::Reducer($stream="Unique404Url", 
+                                 $apply=set(SumStats::UNIQUE));                        
+    local r3 = SumStats::Reducer($stream="response", 
+                                 $apply=set(SumStats::SUM));
 
-event http_reply(c:connection, version:string, code:count, reason:string)
-{
-  if (c$id$orig_h in responsesCounter)
-    ++responseCounter[c$id$orig_h];
-  else
-    responseCounter[c$id$orig_h] = 1;
-  if (code == 404)
-    SumStats::observe("scan_detect_404.lookup", [$host = c$id$orig_h], [$str = c$http$uri]);
-}
+    SumStats::create([$name = "finding scanners",
+                      $epoch = 10min,
+                      $reducers = set(r1,r2,r3),
+                      $epoch_result(ts: time, key: SumStats::Key, result: SumStats::Result)={
+                          local s1 = result["404"];
+						  local s2 = result["Unique404Url"];
+						  local s3 = result["response"];
+                          if(s1$sum > 2 && 1.0*s1$sum / s3$sum > 0.2 && 1.0*s2$unique / s1$sum>0.5){
+                              print fmt("%s is a scanner with %d scan attemps on %d urls",key$host,s1$sum,s2$unique);
+                          } 
+                      }]);
+    }
